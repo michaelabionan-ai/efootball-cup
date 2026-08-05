@@ -284,16 +284,25 @@ function generateInitialState(){
   };
 }
 
+// Sécurité Anti-Plantage : vérifie et répare l'état si besoin
+function sanitizeState(s){
+  if(!s || typeof s !== 'object') s = generateInitialState();
+  if(!s.groups || !s.groups.A) s.groups = generateInitialState().groups;
+  if(!s.matches || !Array.isArray(s.matches) || s.matches.length === 0) s.matches = generateInitialState().matches;
+  if(!s.knockout) s.knockout = { qf:null, sf:null, final:null, thirdPlace:null };
+  return s;
+}
+
 async function saveState(s){
   s.updatedAt = new Date().toISOString();
   try{
     await db.ref('efoot_state').set(s);
-  }catch(e){ console.error('Erreur sauvegarde', e); alert("Erreur d'enregistrement."); }
+  }catch(e){ console.error('Erreur sauvegarde', e); }
 }
 
 function computeStandings(groupKey){
-  if (!state || !state.groups || !state.groups[groupKey]) return [];
-  const teams = state.groups[groupKey];
+  state = sanitizeState(state);
+  const teams = state.groups[groupKey] || [];
   const table = {};
   teams.forEach(t=> table[t] = {team:t, pts:0, j:0, v:0, n:0, d:0, bp:0, bc:0, diff:0});
   
@@ -315,15 +324,10 @@ function computeStandings(groupKey){
   );
 }
 
-function allGroupMatchesPlayed(){
-  if (!state || !state.matches) return false;
-  return state.matches.every(m=>m.hg!==null && m.ag!==null && m.hg!=='' && m.ag!=='');
-}
-
 function computeLeaderboards(){
+  state = sanitizeState(state);
   const goals = {}, conceded = {};
   PARTICIPANTS.forEach(p=>{ goals[p]=0; conceded[p]=0; });
-  if (!state) return {goalsArr: [], concededArr: []};
 
   if (state.matches && Array.isArray(state.matches)) {
     state.matches.forEach(m=>{
@@ -382,31 +386,23 @@ function computeLeaderboards(){
   return {goalsArr, concededArr};
 }
 
-// RÈGLE STRICTE DES QUARTS : 1er vs 2ème de groupes différents
+// RÈGLE STRICTE DES QUARTS DE FINALE
 function generateQF(){
+  state = sanitizeState(state);
   const stand = {};
   ['A','B','C','D'].forEach(k=> {
     const s = computeStandings(k);
     stand[k] = [
-      (s[0] && s[0].team) ? s[0].team : `1er Groupe ${k}`,
-      (s[1] && s[1].team) ? s[1].team : `2e Groupe ${k}`
+      (s[0] && s[0].team) ? s[0].team : `1er Gr ${k}`,
+      (s[1] && s[1].team) ? s[1].team : `2e Gr ${k}`
     ];
   });
 
   const makeTie = (id, home, away)=>({
-    id, 
-    round:'QF', 
-    home: home || '?', 
-    away: away || '?', 
-    legs:[emptyStat(),emptyStat()], 
-    tiebreak:emptyStat(), 
-    manualWinner:null, 
-    winner:null
+    id, round:'QF', home: home||'?', away: away||'?',
+    legs:[emptyStat(),emptyStat()], tiebreak:emptyStat(), manualWinner:null, winner:null
   });
 
-  if(!state.knockout) state.knockout = {};
-  
-  // A1 vs B2, B1 vs A2, C1 vs D2, D1 vs C2
   state.knockout.qf = [
     makeTie('qf1', stand.A[0], stand.B[1]), // 1er A vs 2e B
     makeTie('qf2', stand.B[0], stand.A[1]), // 1er B vs 2e A
@@ -419,7 +415,9 @@ function generateQF(){
 }
 
 function generateSF(){
+  state = sanitizeState(state);
   const qf = state.knockout.qf;
+  if(!qf) return;
   const makeTie = (id,home,away)=>({id, round:'SF', home: home||'?', away: away||'?', legs:[emptyStat(),emptyStat()], tiebreak:emptyStat(), manualWinner:null, winner:null});
   state.knockout.sf = [
     makeTie('sf1', qf[0].winner, qf[1].winner),
@@ -430,7 +428,9 @@ function generateSF(){
 }
 
 function generateFinals(){
+  state = sanitizeState(state);
   const sf = state.knockout.sf;
+  if(!sf) return;
   const sf1Loser = sf[0].winner===sf[0].home ? sf[0].away : sf[0].home;
   const sf2Loser = sf[1].winner===sf[1].home ? sf[1].away : sf[1].home;
   state.knockout.final = {id:'final', round:'F', home:sf[0].winner||'?', away:sf[1].winner||'?', match:emptyStat(), manualWinner:null, winner:null};
@@ -438,14 +438,16 @@ function generateFinals(){
 }
 
 function tieAggregate(tie){
+  if(!tie || !tie.legs) return null;
   const l1 = tie.legs[0], l2 = tie.legs[1];
-  if(l1.hg===null||l1.ag===null||l2.hg===null||l2.ag===null||l1.hg===''||l1.ag===''||l2.hg===''||l2.ag==='') return null;
+  if(!l1 || !l2 || l1.hg===null||l1.ag===null||l2.hg===null||l2.ag===null||l1.hg===''||l1.ag===''||l2.hg===''||l2.ag==='') return null;
   const homeAgg = parseInt(l1.hg) + parseInt(l2.ag);
   const awayAgg = parseInt(l1.ag) + parseInt(l2.hg);
   return {homeAgg, awayAgg};
 }
 
 function evaluateTieWinner(tie){
+  if(!tie) return;
   if(tie.manualWinner){ tie.winner = tie.manualWinner; return; }
   const agg = tieAggregate(tie);
   if(!agg){ tie.winner = null; return; }
@@ -477,18 +479,22 @@ function fmtDate(iso){
 }
 
 function render(){
-  if(!state) return;
-  document.getElementById('updatedAt').textContent = 'Dernière mise à jour : ' + fmtDate(state.updatedAt);
-  document.getElementById('adminBtn').textContent = isAdmin ? '🔓 Admin actif' : '🔒 Mode admin';
-  document.getElementById('adminBtn').className = 'admin-btn' + (isAdmin?' on':'');
-  const main = document.getElementById('main');
-  if(currentTab==='groupes') main.innerHTML = renderGroupes();
-  if(currentTab==='classement') main.innerHTML = renderClassement();
-  if(currentTab==='calendrier') main.innerHTML = renderCalendrier();
-  if(currentTab==='finale') main.innerHTML = renderFinale();
-  if(currentTab==='palmares') main.innerHTML = renderPalmares();
-  if(currentTab==='regles') main.innerHTML = renderRegles();
-  attachHandlers();
+  try {
+    state = sanitizeState(state);
+    document.getElementById('updatedAt').textContent = 'Dernière mise à jour : ' + fmtDate(state.updatedAt);
+    document.getElementById('adminBtn').textContent = isAdmin ? '🔓 Admin actif' : '🔒 Mode admin';
+    document.getElementById('adminBtn').className = 'admin-btn' + (isAdmin?' on':'');
+    const main = document.getElementById('main');
+    if(currentTab==='groupes') main.innerHTML = renderGroupes();
+    if(currentTab==='classement') main.innerHTML = renderClassement();
+    if(currentTab==='calendrier') main.innerHTML = renderCalendrier();
+    if(currentTab==='finale') main.innerHTML = renderFinale();
+    if(currentTab==='palmares') main.innerHTML = renderPalmares();
+    if(currentTab==='regles') main.innerHTML = renderRegles();
+    attachHandlers();
+  } catch(err) {
+    console.error("Erreur rendu:", err);
+  }
 }
 
 function renderGroupes(){
@@ -526,4 +532,356 @@ function renderClassement(){
     <div class="card">
       <div class="group-title-row"><span class="gdot" style="background:${GROUP_COLOR[k]}"></span><h2 style="margin:0;border:none;padding:0;">Groupe ${k}</h2></div>
       ${standingsTable(k)}
-    </div>`).join('') + `<p class="empty-hint">✓ = qualifi
+    </div>`).join('') + `<p class="empty-hint">✓ = qualifié·e pour les quarts de finale (2 premiers de chaque groupe)</p>`;
+}
+
+function statCell(m, prefix){
+  if(isAdmin){
+    return `<div class="stat-inputs">
+      <div class="stat-line">Score
+        <input type="number" min="0" class="score-input" data-${prefix}mid="${m.id}" data-${prefix}field="hg" value="${m.hg===null?'':m.hg}">
+        <span>-</span>
+        <input type="number" min="0" class="score-input" data-${prefix}mid="${m.id}" data-${prefix}field="ag" value="${m.ag===null?'':m.ag}">
+      </div>
+      <button class="save-btn" data-${prefix}save="${m.id}">OK</button>
+    </div>`;
+  }
+  return `<div class="score-display">${m.hg===null?'–':m.hg} - ${m.ag===null?'–':m.ag}</div>`;
+}
+
+function matchRow(m){
+  return `<div class="match-row">
+    <span class="group-tag" style="background:${GROUP_COLOR[m.group]}">GR ${m.group}</span>
+    <span class="teams">${m.home} <span style="color:var(--muted)">vs</span> ${m.away}</span>
+    ${statCell(m,'g')}
+  </div>`;
+}
+
+function renderCalendrier(){
+  return ['A','B','C','D'].map(k=>{
+    const ms = (state.matches||[]).filter(m=>m.group===k).sort((a,b)=>a.order-b.order);
+    return `<div class="card">
+      <div class="group-title-row"><span class="gdot" style="background:${GROUP_COLOR[k]}"></span><h2 style="margin:0;border:none;padding:0;">Calendrier — Groupe ${k}</h2></div>
+      ${ms.map(matchRow).join('')}
+    </div>`;
+  }).join('');
+}
+
+function legStatRow(tie, idx, label){
+  const l = (tie.legs && tie.legs[idx]) ? tie.legs[idx] : emptyStat();
+  if(isAdmin){
+    return `<div class="leg-row">
+      <span class="leg-label">${label} · score</span>
+      <input type="number" min="0" class="score-input" data-leg="${tie.id}" data-legidx="${idx}" data-field="hg" value="${l.hg===null?'':l.hg}">
+      <span>-</span>
+      <input type="number" min="0" class="score-input" data-leg="${tie.id}" data-legidx="${idx}" data-field="ag" value="${l.ag===null?'':l.ag}">
+    </div>`;
+  }
+  return `<div class="leg-row">
+    <span class="leg-label">${label}</span>
+    <span class="score-display">${l.hg===null?'–':l.hg} - ${l.ag===null?'–':l.ag}</span>
+  </div>`;
+}
+
+function tieCard(tie, isSingle){
+  if(!tie) return '';
+  if(!isSingle) evaluateTieWinner(tie);
+  if(isSingle) evaluateSingleMatch(tie);
+  let body = '';
+  if(isSingle){
+    const m = tie.match || emptyStat();
+    body = `<div class="leg-row">
+      <span class="leg-label">Match · score</span>
+      ${isAdmin ? `
+        <input type="number" min="0" class="score-input" data-single="${tie.id}" data-field="hg" value="${m.hg===null?'':m.hg}">
+        <span>-</span>
+        <input type="number" min="0" class="score-input" data-single="${tie.id}" data-field="ag" value="${m.ag===null?'':m.ag}">
+        <button class="save-btn" data-savesingle="${tie.id}">OK</button>
+      ` : `<span class="score-display">${m.hg===null?'–':m.hg} - ${m.ag===null?'–':m.ag}</span>`}
+    </div>`;
+    if(m.hg!==null && m.ag!==null && m.hg===m.ag && !tie.winner){
+      body += `<div class="empty-hint">Égalité — départage (tirs au but). Désigne le vainqueur :</div>
+        <div class="manual-btns">
+          ${isAdmin ? `<button data-manual="${tie.id}" data-team="${tie.home}">${tie.home}</button><button data-manual="${tie.id}" data-team="${tie.away}">${tie.away}</button>` : ''}
+        </div>`;
+    }
+  } else {
+    const agg = tieAggregate(tie);
+    body = legStatRow(tie,0,'Match aller') + legStatRow(tie,1,'Match retour');
+    body += isAdmin ? `<button class="save-btn" data-savetie="${tie.id}" style="margin-top:6px;">OK</button>` : '';
+    body += agg ? `<div class="agg">Cumulé : ${agg.homeAgg} - ${agg.awayAgg}</div>` : '';
+    if(agg && agg.homeAgg===agg.awayAgg){
+      const tb = tie.tiebreak || emptyStat();
+      body += `<div class="leg-row">
+        <span class="leg-label">Départage (6 min)</span>
+        ${isAdmin ? `
+          <input type="number" min="0" class="score-input" data-tb="${tie.id}" data-field="hg" value="${tb.hg===null?'':tb.hg}">
+          <span>-</span>
+          <input type="number" min="0" class="score-input" data-tb="${tie.id}" data-field="ag" value="${tb.ag===null?'':tb.ag}">
+          <button class="save-btn" data-savetb="${tie.id}">OK</button>
+        ` : `<span class="score-display">${tb.hg===null?'–':tb.hg} - ${tb.ag===null?'–':tb.ag}</span>`}
+      </div>`;
+      if(tb.hg!==null && tb.ag!==null && tb.hg===tb.ag && !tie.winner){
+        body += `<div class="empty-hint">Toujours à égalité — désigne le vainqueur :</div>
+        <div class="manual-btns">
+          ${isAdmin ? `<button data-manual="${tie.id}" data-team="${tie.home}">${tie.home}</button><button data-manual="${tie.id}" data-team="${tie.away}">${tie.away}</button>` : ''}
+        </div>`;
+      }
+    }
+  }
+  return `<div class="tie-card">
+    <h4>${tie.home || '?'} <span style="color:var(--muted)">vs</span> ${tie.away || '?'}</h4>
+    ${body}
+    ${tie.winner ? `<div class="winner-pill">🏆 ${tie.winner}</div>` : ''}
+  </div>`;
+}
+
+function renderFinale(){
+  const k = state.knockout || {};
+  let html = '';
+
+  if (isAdmin) {
+    html += `<div class="card" style="border:1px dashed var(--gold);">
+      <h3 style="margin-top:0;color:var(--gold);font-family:'Bebas Neue',sans-serif;">Options Admin — Phase Finale</h3>
+      <button class="gen-btn" id="genQF">${k.qf ? '🔄 Régénérer / Réinitialiser les Quarts' : '⚡ Générer les Quarts de Finale'}</button>
+      <p class="empty-hint" style="margin-top:5px;">Règle stricte : 1er Gr A vs 2e Gr B | 1er Gr B vs 2e Gr A | 1er Gr C vs 2e Gr D | 1er Gr D vs 2e Gr C</p>
+    </div>`;
+  }
+
+  if(!k.qf){
+    if(!isAdmin){
+      html += `<div class="card"><h2>Phase finale</h2>
+        <p class="empty-hint">Les quarts de finale n'ont pas encore été générés par l'administrateur.</p>
+      </div>`;
+    }
+    return html;
+  }
+
+  html += `<div class="card"><h2 style="margin-top:0">Quarts de finale (aller-retour)</h2>${k.qf.map(t=>tieCard(t,false)).join('')}</div>`;
+
+  const qfDone = k.qf.every(t=>t.winner);
+  if(qfDone && !k.sf){
+    html += `<div class="card">${isAdmin ? `<button class="gen-btn" id="genSF">⚡ Générer les demi-finales</button>` : `<p class="empty-hint">En attente de la génération des demi-finales par l'admin.</p>`}</div>`;
+  }
+  if(k.sf){
+    html += `<div class="card"><h2 style="margin-top:0">Demi-finales (aller-retour)</h2>${k.sf.map(t=>tieCard(t,false)).join('')}</div>`;
+    const sfDone = k.sf.every(t=>t.winner);
+    if(sfDone && !k.final){
+      html += `<div class="card">${isAdmin ? `<button class="gen-btn" id="genFinals">⚡ Générer la finale et la petite finale</button>` : `<p class="empty-hint">En attente de la génération de la finale.</p>`}</div>`;
+    }
+  }
+  if(k.final){
+    html += `<div class="card"><h2 style="margin-top:0">🥉 Petite finale</h2>${tieCard(k.thirdPlace,true)}</div>`;
+    html += `<div class="card"><h2 style="margin-top:0">🏆 Finale</h2>${tieCard(k.final,true)}</div>`;
+  }
+  return html;
+}
+
+function renderPalmares(){
+  const k = state.knockout || {};
+  const champion = k.final ? k.final.winner : null;
+  const viceChamp = (k.final && champion) ? (champion===k.final.home ? k.final.away : k.final.home) : null;
+  const third = k.thirdPlace ? k.thirdPlace.winner : null;
+  const {goalsArr, concededArr} = computeLeaderboards();
+  const topAttack = (goalsArr && goalsArr.length>0) ? goalsArr[0] : null;
+  const topDefense = (concededArr && concededArr.length>0) ? concededArr[0] : null;
+
+  const laurel = (icon,title,name,sub)=>`
+    <div class="laurel-card">
+      <div class="laurel-icon">${icon}</div>
+      <div>
+        <div class="laurel-title">${title}</div>
+        <div class="laurel-name">${name || 'En attente'}</div>
+        ${sub ? `<div class="laurel-sub">${sub}</div>` : ''}
+      </div>
+    </div>`;
+
+  return `<div class="card">
+    <h2>Palmarès</h2>
+    <div class="palmares-grid">
+      ${laurel('🏆','CHAMPION', champion)}
+      ${laurel('🥈','VICE-CHAMPION', viceChamp)}
+      ${laurel('🥉','3E PLACE', third)}
+      ${laurel('⚽','MEILLEURE ATTAQUE', topAttack && topAttack.val>0 ? topAttack.team : null, topAttack && topAttack.val>0 ? topAttack.val + ' but(s) marqué(s)' : null)}
+      ${laurel('🛡️','MEILLEURE DÉFENSE', topDefense ? topDefense.team : null, topDefense ? topDefense.val + ' but(s) encaissé(s)' : null)}
+    </div>
+  </div>
+  <div class="card">
+    <h2>Classement des attaques (Buts marqués)</h2>
+    <table class="lb-table"><thead><tr><th>Joueur</th><th>Buts Marqués</th></tr></thead>
+    <tbody>${(goalsArr||[]).slice(0,8).map(r=>`<tr><td>${r.team}</td><td class="mono">${r.val}</td></tr>`).join('')}</tbody></table>
+  </div>
+  <div class="card">
+    <h2>Classement des défenses (Buts encaissés)</h2>
+    <table class="lb-table"><thead><tr><th>Joueur</th><th>Buts Encaissés</th></tr></thead>
+    <tbody>${(concededArr||[]).slice(0,8).map(r=>`<tr><td>${r.team}</td><td class="mono">${r.val}</td></tr>`).join('')}</tbody></table>
+  </div>`;
+}
+
+function renderRegles(){
+  return `<div class="card">
+    <h2>Règlement du tournoi</h2>
+    <div class="rules-box">
+      <p><b>Format :</b> 15 joueurs répartis en 4 groupes (A, B, C : 4 joueurs · D : 3 joueurs). Les 2 premiers de chaque groupe se qualifient pour les quarts de finale.</p>
+      <p><b>Phase de groupes :</b> matchs aller-retour, classement par points (victoire = 3 pts, nul = 1 pt, défaite = 0 pt), puis différence de buts, buts marqués, buts concédés, nombre de victoires.</p>
+      <p><b>Phase finale :</b> quarts et demi-finales aller-retour (score cumulé). Finale et petite finale en match unique.</p>
+      <p><b>Égalité en phase à élimination directe :</b> si le score cumulé est égal après les deux matchs, une manche de départage de 6 minutes est jouée.</p>
+      <p><b>Lauréats :</b> Champion, Vice-champion, 3e place, Meilleure attaque, Meilleure défense — calculés automatiquement sur l'ensemble du tournoi (groupes + phase finale).</p>
+      <p><b>Réglages de salle :</b> matchs de 10 min, blessures désactivées, 5 remplacements, forme excellente.</p>
+    </div>
+  </div>`;
+}
+
+// ---------- EVENT HANDLERS ----------
+
+function readNum(el){ return (!el || el.value === '') ? null : parseInt(el.value); }
+
+function attachHandlers(){
+  document.querySelectorAll('[data-gsave]').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const id = btn.getAttribute('data-gsave');
+      const m = (state.matches||[]).find(m=>m.id===id);
+      if(m){
+        ['hg','ag'].forEach(f=>{
+          const el = document.querySelector(`[data-gmid="${id}"][data-gfield="${f}"]`);
+          m[f] = readNum(el);
+        });
+        await saveState(state);
+      }
+    };
+  });
+  document.querySelectorAll('[data-savetie]').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const id = btn.getAttribute('data-savetie');
+      const tie = findTie(id);
+      if(tie){
+        [0,1].forEach(idx=>{
+          ['hg','ag'].forEach(f=>{
+            const el = document.querySelector(`[data-leg="${id}"][data-legidx="${idx}"][data-field="${f}"]`);
+            if(!tie.legs) tie.legs = [emptyStat(), emptyStat()];
+            if(!tie.legs[idx]) tie.legs[idx] = emptyStat();
+            tie.legs[idx][f] = readNum(el);
+          });
+        });
+        evaluateTieWinner(tie);
+        await saveState(state);
+      }
+    };
+  });
+  document.querySelectorAll('[data-savetb]').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const id = btn.getAttribute('data-savetb');
+      const tie = findTie(id);
+      if(tie){
+        ['hg','ag'].forEach(f=>{
+          const el = document.querySelector(`[data-tb="${id}"][data-field="${f}"]`);
+          if(!tie.tiebreak) tie.tiebreak = emptyStat();
+          tie.tiebreak[f] = readNum(el);
+        });
+        evaluateTieWinner(tie);
+        await saveState(state);
+      }
+    };
+  });
+  document.querySelectorAll('[data-savesingle]').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const id = btn.getAttribute('data-savesingle');
+      const m = findSingle(id);
+      if(m){
+        ['hg','ag'].forEach(f=>{
+          const el = document.querySelector(`[data-single="${id}"][data-field="${f}"]`);
+          if(!m.match) m.match = emptyStat();
+          m.match[f] = readNum(el);
+        });
+        evaluateSingleMatch(m);
+        await saveState(state);
+      }
+    };
+  });
+  document.querySelectorAll('[data-manual]').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const id = btn.getAttribute('data-manual');
+      const team = btn.getAttribute('data-team');
+      let tie = findTie(id) || findSingle(id);
+      if(tie){
+        tie.manualWinner = team;
+        tie.winner = team;
+        await saveState(state);
+      }
+    };
+  });
+  const genQF = document.getElementById('genQF');
+  if(genQF) genQF.onclick = async ()=>{ generateQF(); await saveState(state); };
+  const genSF = document.getElementById('genSF');
+  if(genSF) genSF.onclick = async ()=>{ generateSF(); await saveState(state); };
+  const genFinals = document.getElementById('genFinals');
+  if(genFinals) genFinals.onclick = async ()=>{ generateFinals(); await saveState(state); };
+}
+
+function findTie(id){
+  const k = state.knockout || {};
+  if(k.qf){ const t = k.qf.find(t=>t.id===id); if(t) return t; }
+  if(k.sf){ const t = k.sf.find(t=>t.id===id); if(t) return t; }
+  return null;
+}
+function findSingle(id){
+  const k = state.knockout || {};
+  if(k.final && k.final.id===id) return k.final;
+  if(k.thirdPlace && k.thirdPlace.id===id) return k.thirdPlace;
+  return null;
+}
+
+// ---------- ADMIN MODAL ----------
+
+document.getElementById('adminBtn').onclick = ()=>{
+  if(isAdmin){ isAdmin=false; render(); return; }
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `<div class="modal-bg" id="modalBg">
+    <div class="modal">
+      <h3 style="margin-top:0;color:var(--gold);font-family:'Bebas Neue',sans-serif;letter-spacing:1px;">Accès admin</h3>
+      <input type="password" id="pwdInput" placeholder="Mot de passe">
+      <div class="err" id="pwdErr"></div>
+      <button id="pwdSubmit">Entrer</button>
+    </div>
+  </div>`;
+  document.getElementById('modalBg').onclick = (e)=>{ if(e.target.id==='modalBg') root.innerHTML=''; };
+  document.getElementById('pwdSubmit').onclick = ()=>{
+    const val = document.getElementById('pwdInput').value;
+    if(val === ADMIN_PASSWORD){ isAdmin = true; root.innerHTML=''; render(); }
+    else { document.getElementById('pwdErr').textContent = 'Mot de passe incorrect.'; }
+  };
+};
+
+// ---------- NAV ----------
+
+document.getElementById('nav').addEventListener('click',(e)=>{
+  if(e.target.tagName==='BUTTON'){
+    currentTab = e.target.getAttribute('data-tab');
+    document.querySelectorAll('#nav button').forEach(b=>b.classList.remove('active'));
+    e.target.classList.add('active');
+    render();
+  }
+});
+
+// ---------- ÉCOUTE EN TEMPS RÉEL DE LA BASE DE DONNÉES ----------
+
+function initSync(){
+  state = generateInitialState();
+  render();
+
+  db.ref('efoot_state').on('value', async (snapshot) => {
+    const val = snapshot.val();
+    if (val) {
+      state = sanitizeState(val);
+    } else {
+      state = generateInitialState();
+      await saveState(state);
+    }
+    render();
+  });
+}
+
+initSync();
+</script>
+</body>
+</html>
